@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base app theme — actual styling done via Jetpack Compose -->
+    <style name="Theme.JarvisMobile" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#080808</item>
+        <item name="android:statusBarColor">#080808</item>
+        <item name="android:navigationBarColor">#080808</item>
+    </style>
+</resources>
