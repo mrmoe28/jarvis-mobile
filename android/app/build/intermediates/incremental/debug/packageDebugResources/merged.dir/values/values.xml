@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JARVIS</string>
+    <string name="connecting">Connecting to JARVIS\u2026</string>
+    <string name="google_web_client_id">YOUR_WEB_CLIENT_ID_HERE.apps.googleusercontent.com</string>
+    <string name="hint_message">Ask JARVIS anything\u2026</string>
+    <string name="jarvis_offline">JARVIS is offline</string>
+    <string name="ptt_hold">Hold to speak</string>
+    <string name="ptt_release">Release to send</string>
+    <string name="settings_server_hint">http://localhost:3001</string>
+    <string name="settings_server_url">JARVIS Server URL</string>
+    <style name="Theme.JarvisMobile" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#080808</item>
+        <item name="android:statusBarColor">#080808</item>
+        <item name="android:navigationBarColor">#080808</item>
+    </style>
+</resources>

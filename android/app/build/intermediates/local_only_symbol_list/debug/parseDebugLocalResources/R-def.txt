@@ -1,0 +1,16 @@
+R_DEF: Internal format may change without notice
+local
+drawable ic_launcher_background
+drawable ic_launcher_foreground
+mipmap ic_launcher
+mipmap ic_launcher_round
+string app_name
+string connecting
+string google_web_client_id
+string hint_message
+string jarvis_offline
+string ptt_hold
+string ptt_release
+string settings_server_hint
+string settings_server_url
+style Theme.JarvisMobile
