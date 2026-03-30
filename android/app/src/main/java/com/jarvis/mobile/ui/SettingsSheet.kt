@@ -248,8 +248,7 @@ private fun VoiceTab(vm: ChatViewModel) {
     Spacer(Modifier.height(20.dp))
 
     if (voices.isEmpty()) {
-        Text(
-            "No voices available. Make sure the server is reachable.",
+        Text("No voices available — check that TTS is installed on your device.",
             color = TextMuted, fontSize = 11.sp, lineHeight = 16.sp
         )
     } else {
@@ -285,7 +284,7 @@ private fun VoiceTab(vm: ChatViewModel) {
                             color = if (isSelected) JarvisBlue else androidx.compose.ui.graphics.Color(0xFFE8EAED),
                             fontSize = 13.sp
                         )
-                        Text("${voice.gender} Â· ${voice.culture}", color = TextMuted, fontSize = 10.sp)
+                        Text("${voice.locale}  quality ${voice.quality}", color = TextMuted, fontSize = 10.sp)
                     }
                     IconButton(
                         onClick  = { vm.previewVoice(voice.name) },

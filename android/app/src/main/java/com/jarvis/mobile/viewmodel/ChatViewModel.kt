@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.jarvis.mobile.audio.JarvisAudioPlayer
+import com.jarvis.mobile.audio.JarvisTTS
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.jarvis.mobile.data.ChatMessage
@@ -21,7 +22,6 @@ import com.jarvis.mobile.data.StreamChunk
 import com.jarvis.mobile.notification.JarvisNotificationListener
 import com.jarvis.mobile.prefs.LoginPreferences
 import com.jarvis.mobile.network.JarvisClient
-import com.jarvis.mobile.network.JarvisClient.SapiVoice
 import com.jarvis.mobile.prefs.AppPreferences
 import com.jarvis.mobile.download.JarvisDownloader
 import com.jarvis.mobile.sms.SmsReader
@@ -43,48 +43,49 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = AppPreferences(application)
     private val loginPrefs = LoginPreferences(application)
     private var client = JarvisClient(prefs.serverUrl)
+    private val tts = JarvisTTS.getInstance(application).also { engine ->
+        engine.onReady = { voices ->
+            viewModelScope.launch(Dispatchers.Main) {
+                this@ChatViewModel.voices.value = voices
+                if (prefs.selectedVoice.isBlank() && voices.isNotEmpty()) {
+                    prefs.selectedVoice = voices[0].name
+                    selectedVoice.value = voices[0].name
+                    engine.setVoice(voices[0].name)
+                } else if (prefs.selectedVoice.isNotBlank()) {
+                    engine.setVoice(prefs.selectedVoice)
+                }
+            }
+        }
+    }
 
-    val logins = MutableStateFlow(loginPrefs.logins)
-
-    val messages = mutableStateListOf<ChatMessage>()
-    val isStreaming = MutableStateFlow(false)
-    val isSpeaking  = MutableStateFlow(false)
-    val serverUrl   = MutableStateFlow(prefs.serverUrl)
-    val ttsEnabled  = MutableStateFlow(prefs.ttsEnabled)
-    val voices      = MutableStateFlow<List<SapiVoice>>(emptyList())
+    val logins        = MutableStateFlow(loginPrefs.logins)
+    val messages      = mutableStateListOf<ChatMessage>()
+    val isStreaming    = MutableStateFlow(false)
+    val isSpeaking    = MutableStateFlow(false)
+    val serverUrl     = MutableStateFlow(prefs.serverUrl)
+    val ttsEnabled    = MutableStateFlow(prefs.ttsEnabled)
+    val voices        = MutableStateFlow<List<JarvisTTS.AndroidVoice>>(emptyList())
     val selectedVoice = MutableStateFlow(prefs.selectedVoice)
     val googleAccount = MutableStateFlow<GoogleAccount?>(null)
-    val googleAuthUrl  = MutableStateFlow<String?>(null)
+    val googleAuthUrl = MutableStateFlow<String?>(null)
     val smsPermissionGranted = MutableStateFlow(
         ContextCompat.checkSelfPermission(application, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
     )
 
-    /** Fires once when all queued TTS audio finishes — used for continuous talk trigger. */
     private val _speakingDone = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val speakingDone = _speakingDone.asSharedFlow()
 
     private var currentCall: Call? = null
-    private var ttsCall: Call? = null
     private var notificationCall: Call? = null
     private var ttsSentenceBuf = StringBuilder()
-    // TTS batching — accumulate 2 sentences before firing a network request
     private var ttsBatchBuf = StringBuilder()
     private var ttsBatchCount = 0
-    // Count of TTS HTTP requests currently in flight — used to gate speakingDone
-    private var ttsFetchActive = 0
 
     private val _pendingNotification = MutableStateFlow<NotificationEvent?>(null)
     val pendingNotification: StateFlow<NotificationEvent?> = _pendingNotification
 
     init {
-        JarvisAudioPlayer.onSpeakingChanged = { playing ->
-            viewModelScope.launch(Dispatchers.Main) {
-                isSpeaking.value = playing
-                if (!playing && !isStreaming.value && ttsFetchActive == 0) _speakingDone.tryEmit(Unit)
-            }
-        }
         connectNotifications()
-        loadVoices()
         refreshGoogleStatus()
     }
 
@@ -103,16 +104,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun loadVoices() {
-        client.fetchVoices { list ->
-            voices.value = list
-            if (prefs.selectedVoice.isBlank() && list.isNotEmpty()) {
-                prefs.selectedVoice = list[0].name
-                selectedVoice.value = list[0].name
-            }
-        }
-    }
-
     fun onSmsPermissionResult(granted: Boolean) {
         smsPermissionGranted.value = granted
     }
@@ -120,24 +111,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun setSelectedVoice(name: String) {
         prefs.selectedVoice = name
         selectedVoice.value = name
+        tts.setVoice(name)
     }
 
     fun previewVoice(name: String) {
-        client.fetchSpeakAudio("All systems online, Sir.", voice = name) { audioBytes, mimeType ->
-            if (audioBytes != null) JarvisAudioPlayer.play(getApplication(), audioBytes, mimeType)
-        }
+        tts.setVoice(name)
+        tts.speak("All systems online, Sir.")
     }
 
-    /** Stop TTS audio immediately. Cancels any in-flight TTS network request too. */
     fun stopSpeaking() {
-        ttsCall?.cancel()
-        ttsCall = null
-        ttsFetchActive = 0
+        tts.stop()
         JarvisAudioPlayer.stop()
         isSpeaking.value = false
     }
 
-    /** Interrupt — cancel any in-flight response AND stop audio. */
     fun interrupt() {
         cancelStreaming()
         stopSpeaking()
@@ -147,11 +134,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (text.isBlank()) return
         if (isStreaming.value) return
 
-        JarvisAudioPlayer.stop()
+        tts.stop()
         ttsSentenceBuf = StringBuilder()
         ttsBatchBuf = StringBuilder()
         ttsBatchCount = 0
-        ttsFetchActive = 0
 
         val userMsg = ChatMessage(role = "user", content = text.trim())
         messages.add(userMsg)
@@ -171,9 +157,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val notifications = synchronized(JarvisNotificationListener.recent) {
             JarvisNotificationListener.recent.toList()
         }
-        val sms = if (smsPermissionGranted.value) {
-            SmsReader.read(getApplication())
-        } else emptyList()
+        val sms = if (smsPermissionGranted.value) SmsReader.read(getApplication()) else emptyList()
         val phoneContext = if (notifications.isNotEmpty() || sms.isNotEmpty()) {
             PhoneContext(notifications = notifications, sms = sms)
         } else null
@@ -196,7 +180,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         is StreamChunk.Content -> {
                             contentBuf.append(chunk.text)
                             messages[idx] = messages[idx].copy(content = contentBuf.toString())
-                            // Batch 2 sentences per TTS request — halves network round-trips
                             if (prefs.ttsEnabled) {
                                 ttsSentenceBuf.append(chunk.text)
                                 val boundary = findSentenceBoundary(ttsSentenceBuf.toString())
@@ -229,7 +212,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 sources = sources
                             )
                             isStreaming.value = false
-                            // Flush batch + any remaining unbounded text in one TTS call
                             if (prefs.ttsEnabled) {
                                 val tail = ttsSentenceBuf.toString()
                                     .replace(Regex("""<!--SOURCES:[\s\S]+?-->"""), "").trim()
@@ -238,6 +220,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 ttsSentenceBuf = StringBuilder()
                                 ttsBatchBuf = StringBuilder()
                                 ttsBatchCount = 0
+                            }
+                            viewModelScope.launch(Dispatchers.Main) {
+                                _speakingDone.tryEmit(Unit)
                             }
                         }
                         is StreamChunk.Error -> {
@@ -251,6 +236,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         )
+    }
+
+    private fun speakSegment(text: String) {
+        val clean = stripForSpeech(text)
+        if (clean.isBlank()) return
+        tts.speak(clean)
+        isSpeaking.value = true
     }
 
     private fun findSentenceBoundary(text: String): Int {
@@ -274,31 +266,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return -1
     }
 
-    private fun speakSegment(text: String) {
-        val clean = stripForSpeech(text)
-        if (clean.isBlank()) return
-        ttsFetchActive++
-        ttsCall = client.fetchSpeakAudio(clean, voice = prefs.selectedVoice.ifBlank { null }) { audioBytes, mimeType ->
-            viewModelScope.launch(Dispatchers.Main) {
-                ttsFetchActive--
-                if (audioBytes != null) {
-                    JarvisAudioPlayer.enqueue(getApplication(), audioBytes, mimeType)
-                } else if (!isStreaming.value && ttsFetchActive == 0 && !isSpeaking.value) {
-                    // TTS fetch failed and nothing else is playing — signal done
-                    _speakingDone.tryEmit(Unit)
-                }
-            }
-        }
-    }
-
     fun cancelStreaming() {
         currentCall?.cancel()
         isStreaming.value = false
-        JarvisAudioPlayer.stop()
         val idx = messages.indexOfLast { it.isStreaming }
-        if (idx >= 0) {
-            messages[idx] = messages[idx].copy(isStreaming = false)
-        }
+        if (idx >= 0) messages[idx] = messages[idx].copy(isStreaming = false)
     }
 
     fun updateServerUrl(url: String) {
@@ -310,13 +282,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         client = JarvisClient(clean)
         notificationCall?.cancel()
         connectNotifications()
-        loadVoices()
+        refreshGoogleStatus()
     }
 
     fun setTtsEnabled(enabled: Boolean) {
         prefs.ttsEnabled = enabled
         ttsEnabled.value = enabled
-        if (!enabled) JarvisAudioPlayer.stop()
+        if (!enabled) { tts.stop(); JarvisAudioPlayer.stop() }
     }
 
     fun newChat() {
@@ -334,23 +306,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _pendingNotification.value = event
                 if (event.type == "jarvis_proactive" && event.content.isNotBlank()) {
                     messages.add(ChatMessage(role = "assistant", content = event.content))
-                    if (prefs.ttsEnabled) {
-                        ttsCall = client.fetchSpeakAudio(event.content, voice = prefs.selectedVoice.ifBlank { null }) { audioBytes, mimeType ->
-                            if (audioBytes != null) JarvisAudioPlayer.play(getApplication(), audioBytes, mimeType)
-                        }
-                    }
+                    if (prefs.ttsEnabled) tts.speak(event.content)
                 } else if (event.label.isNotBlank()) {
-                    messages.add(
-                        ChatMessage(
-                            role = "assistant",
-                            content = "Task complete: **${event.label}**\n${event.result.take(200).ifEmpty { "" }}".trim()
-                        )
-                    )
-                    if (prefs.ttsEnabled) {
-                        ttsCall = client.fetchSpeakAudio("Task complete: ${event.label}", voice = prefs.selectedVoice.ifBlank { null }) { audioBytes, mimeType ->
-                            if (audioBytes != null) JarvisAudioPlayer.play(getApplication(), audioBytes, mimeType)
-                        }
-                    }
+                    messages.add(ChatMessage(
+                        role = "assistant",
+                        content = "Task complete: **${event.label}**\n${event.result.take(200).ifEmpty { "" }}".trim()
+                    ))
+                    if (prefs.ttsEnabled) tts.speak("Task complete: ${event.label}")
                 }
             }
         }
@@ -391,8 +353,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         currentCall?.cancel()
-        ttsCall?.cancel()
         notificationCall?.cancel()
+        tts.stop()
         JarvisAudioPlayer.stop()
     }
 }
